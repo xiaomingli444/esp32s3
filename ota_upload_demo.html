@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ESP32‑S3 OTA 上传升级 Demo</title>
+    <style>
+      :root {
+        --fg: #0f172a;
+        --muted: #475569;
+        --bg: #ffffff;
+        --card: #f8fafc;
+        --border: #e2e8f0;
+        --primary: #2a7fff;
+        --danger: #ef4444;
+      }
+      html,
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+        margin: 0;
+      }
+      .wrap {
+        max-width: 860px;
+        margin: 24px auto;
+        padding: 0 16px 24px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 12px;
+      }
+      p {
+        margin: 8px 0;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px;
+        margin-top: 12px;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 10px;
+        align-items: center;
+        margin: 10px 0;
+      }
+      label {
+        color: var(--muted);
+        font-size: 14px;
+      }
+      input[type="text"],
+      input[type="file"] {
+        width: 100%;
+        padding: 10px 10px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #fff;
+        box-sizing: border-box;
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 8px;
+      }
+      button {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 14px;
+        background: #fff;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      button.primary {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: #fff;
+      }
+      button.danger {
+        background: var(--danger);
+        border-color: var(--danger);
+        color: #fff;
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+      }
+      .status {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 10px;
+        margin: 10px 0;
+      }
+      progress {
+        width: 100%;
+        height: 14px;
+      }
+      pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin: 10px 0 0;
+        padding: 10px;
+        background: #0b1220;
+        color: #e2e8f0;
+        border-radius: 10px;
+      }
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .inline {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>ESP32‑S3（ESP‑IDF）OTA 固件升级（仅“接收上传”模式）</h1>
+      <p>
+        流程：<span class="mono">/api/ota/upload/request</span> → 等待设备 LCD 点“升级” →
+        <span class="mono">/api/ota/upload/data</span>。
+      </p>
+      <p class="hint">
+        默认地址 <span class="mono">http://192.168.4.1</span>（设备 AP 模式）。
+      </p>
+
+      <div class="card">
+        <div class="row">
+          <label for="host">设备地址</label>
+          <input id="host" type="text" value="http://192.168.4.1" />
+        </div>
+        <div class="row">
+          <label for="file">固件 bin</label>
+          <input id="file" type="file" accept=".bin" />
+        </div>
+        <div class="row">
+          <label>校验</label>
+          <div class="inline">
+            <label class="inline" style="gap: 6px">
+              <input id="withSha" type="checkbox" />
+              <span>计算 SHA256（可选）</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="btnStart" class="primary">开始升级</button>
+          <button id="btnCancel" class="danger" disabled>取消上传</button>
+        </div>
+
+        <div class="status">
+          <label>状态</label>
+          <div id="statusText" class="mono">idle</div>
+        </div>
+        <div class="status">
+          <label>进度</label>
+          <div>
+            <progress id="prog" value="0" max="100"></progress>
+            <div id="progText" class="hint mono">0%</div>
+          </div>
+        </div>
+
+        <pre id="log" class="mono"></pre>
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const logEl = $("log");
+      const statusEl = $("statusText");
+      const progEl = $("prog");
+      const progTextEl = $("progText");
+
+      let current = {
+        requestId: "",
+        token: "",
+        xhr: null,
+        abort: false,
+      };
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function appendLog(line) {
+        const now = new Date().toISOString().slice(11, 19);
+        logEl.textContent += `[${now}] ${line}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function sleep(ms) {
+        return new Promise((r) => setTimeout(r, ms));
+      }
+
+      function normalizeHost(h) {
+        const s = String(h || "").trim();
+        return s.endsWith("/") ? s.slice(0, -1) : s;
+      }
+
+      async function sha256Hex(file) {
+        if (!window.crypto || !window.crypto.subtle) {
+          throw new Error("当前页面不是安全上下文，WebCrypto 不可用，无法计算 SHA256。");
+        }
+        const buf = await file.arrayBuffer();
+        const digest = await crypto.subtle.digest("SHA-256", buf);
+        const bytes = new Uint8Array(digest);
+        return Array.from(bytes)
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+      }
+
+      async function jsonFetch(url, init) {
+        const r = await fetch(url, init);
+        const t = await r.text();
+        if (!r.ok) {
+          throw new Error(`HTTP ${r.status}: ${t || r.statusText}`);
+        }
+        return t ? JSON.parse(t) : {};
+      }
+
+      function setProgress(received, total) {
+        if (!total || total <= 0) {
+          progEl.value = 0;
+          progTextEl.textContent = "0%";
+          return;
+        }
+        const pct = Math.max(0, Math.min(100, Math.floor((received / total) * 100)));
+        progEl.value = pct;
+        progTextEl.textContent = `${pct}% (${received}/${total})`;
+      }
+
+      function uiBusy(busy) {
+        $("btnStart").disabled = busy;
+        $("btnCancel").disabled = !busy;
+        $("host").disabled = busy;
+        $("file").disabled = busy;
+        $("withSha").disabled = busy;
+      }
+
+      $("btnCancel").addEventListener("click", () => {
+        current.abort = true;
+        if (current.xhr) {
+          current.xhr.abort();
+        }
+        setStatus("canceled");
+        appendLog("用户取消。");
+        uiBusy(false);
+      });
+
+      $("btnStart").addEventListener("click", async () => {
+        logEl.textContent = "";
+        progEl.value = 0;
+        progTextEl.textContent = "0%";
+        current = { requestId: "", token: "", xhr: null, abort: false };
+
+        const host = normalizeHost($("host").value);
+        const file = $("file").files && $("file").files[0];
+        if (!host) {
+          appendLog("请填写设备地址。");
+          return;
+        }
+        if (!file) {
+          appendLog("请选择 .bin 文件。");
+          return;
+        }
+
+        uiBusy(true);
+
+        try {
+          setStatus("preparing");
+          appendLog(`目标：${host}`);
+          appendLog(`文件：${file.name} (${file.size} bytes)`);
+
+          const meta = { filename: file.name, size: file.size };
+          if ($("withSha").checked) {
+            setStatus("hashing");
+            appendLog("计算 SHA256...");
+            meta.sha256 = await sha256Hex(file);
+            appendLog(`SHA256: ${meta.sha256}`);
+          }
+
+          setStatus("requesting");
+          appendLog("发送 request...");
+          const req = await jsonFetch(`${host}/api/ota/upload/request`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(meta),
+          });
+
+          current.requestId = req.requestId || "";
+          if (!current.requestId) {
+            throw new Error("request 返回缺少 requestId。");
+          }
+          appendLog(`requestId=${current.requestId}`);
+          appendLog("请在设备 LCD 弹窗中点击“升级”。");
+
+          // 等待 accepted/token
+          setStatus("pending");
+          const statusUrl = `${host}/api/ota/upload/status?requestId=${encodeURIComponent(current.requestId)}`;
+          for (;;) {
+            if (current.abort) throw new Error("用户取消。");
+            await sleep(300);
+            const st = await jsonFetch(statusUrl, { method: "GET" });
+            const s = st.status || "";
+            if (typeof st.received === "number" && typeof st.total === "number") {
+              setProgress(st.received, st.total);
+            }
+            if (s === "accepted") {
+              current.token = st.token || "";
+              if (!current.token) throw new Error("accepted 但未返回 token。");
+              appendLog("设备已接受，开始上传...");
+              break;
+            }
+            if (s === "rejected" || s === "failed" || s === "expired") {
+              throw new Error(`设备状态=${s}，原因=${st.reason || "unknown"}`);
+            }
+          }
+
+          // 上传 raw bin（XHR 便于进度）
+          setStatus("uploading");
+          const dataUrl = `${host}/api/ota/upload/data?requestId=${encodeURIComponent(current.requestId)}`;
+          await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            current.xhr = xhr;
+            xhr.open("POST", dataUrl, true);
+            xhr.setRequestHeader("X-Upload-Token", current.token);
+
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                setProgress(e.loaded, e.total);
+              }
+            };
+
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                resolve();
+              } else {
+                reject(new Error(`upload HTTP ${xhr.status}: ${xhr.responseText || xhr.statusText}`));
+              }
+            };
+
+            xhr.onerror = () => reject(new Error("网络错误/设备断开。"));
+            xhr.onabort = () => reject(new Error("已取消上传。"));
+
+            xhr.send(file);
+          });
+
+          appendLog("上传完成，等待设备写入/校验/切换分区...");
+          setStatus("finalizing");
+
+          // 等待 success/failed
+          for (;;) {
+            if (current.abort) throw new Error("用户取消。");
+            await sleep(500);
+            const st = await jsonFetch(statusUrl, { method: "GET" });
+            const s = st.status || "";
+            if (typeof st.received === "number" && typeof st.total === "number") {
+              setProgress(st.received, st.total);
+            }
+            if (s === "success") {
+              setStatus("success");
+              appendLog("设备已写入完成，将在设备端重启。");
+              break;
+            }
+            if (s === "failed") {
+              throw new Error(`升级失败：${st.reason || "unknown"}`);
+            }
+          }
+        } catch (e) {
+          setStatus("error");
+          appendLog(`错误：${e && e.message ? e.message : String(e)}`);
+        } finally {
+          uiBusy(false);
+        }
+      });
+    </script>
+  </body>
+</html>
+

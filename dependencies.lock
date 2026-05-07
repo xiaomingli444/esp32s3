@@ -1,0 +1,24 @@
+dependencies:
+  esp-dsp:
+    dependencies: []
+    source:
+      path: C:\Users\XD305\Desktop\ESP32S3\components\esp-dsp
+      type: local
+    version: 1.7.0
+  esp_new_jpeg:
+    dependencies: []
+    source:
+      path: C:\Users\XD305\Desktop\ESP32S3\components\esp_new_jpeg
+      type: local
+    version: 0.6.1
+  idf:
+    source:
+      type: idf
+    version: 5.5.1
+direct_dependencies:
+- espressif/esp-dsp
+- espressif/esp_new_jpeg
+- idf
+manifest_hash: db376c7059f94d75ee1bf67e73b94b5ae2260196788f06de056508b7be2882c1
+target: esp32s3
+version: 2.0.0
